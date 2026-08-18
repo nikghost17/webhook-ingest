@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
@@ -58,6 +59,35 @@ func TestWebhookStoresEventAndCall(t *testing.T) {
 	}
 	if gotAccount != accountID {
 		t.Fatalf("call belongs to %q, want %q", gotAccount, accountID)
+	}
+}
+
+// TestRecordingIsMarkedProcessed verifies that the background goroutine that
+// calls MarkRecordingProcessed actually succeeds. Before the fix this always
+// failed silently: the goroutine captured the HTTP request context, which is
+// already cancelled by the time the handler returns a 200, so the DB update
+// was a no-op and recording_processed stayed FALSE.
+func TestRecordingIsMarkedProcessed(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	// The recording goroutine sleeps 50 ms then calls MarkRecordingProcessed.
+	// Give it a generous 500 ms to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	var processed bool
+	row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&processed); err != nil {
+		t.Fatalf("scan recording_processed: %v", err)
+	}
+	if !processed {
+		t.Fatal("recording_processed is still FALSE — processRecording goroutine did not complete successfully")
 	}
 }
 

@@ -73,10 +73,13 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 	s.cache.Record(rec.AccountID, rec.DurationSec)
 
 	// Recordings are slow to fetch, so that part does not block the provider.
+	// We must use context.Background() here — the request context (ctx) is
+	// cancelled as soon as the HTTP handler returns its 200 response, which
+	// would cause MarkRecordingProcessed to fail every time.
 	if rec.RecordingURL != "" {
 		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
-				// TODO: handle
+			if err := s.processRecording(context.Background(), rec); err != nil {
+				s.log.Error("processRecording failed", "call_id", rec.CallID, "err", err)
 			}
 		}()
 	}
