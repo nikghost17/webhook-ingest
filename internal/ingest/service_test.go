@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,5 +111,74 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
+	}
+}
+
+// TestDuplicateDeliveryDoesNotDoubleCountStats is the key missing test:
+// the original suite only checked events table count, not account_stats.
+// A duplicate delivery must not add a second call_count or duration to stats.
+func TestDuplicateDeliveryDoesNotDoubleCountStats(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	for i := 0; i < 3; i++ {
+		if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+			t.Fatalf("delivery %d: got %d, want 200", i, resp.StatusCode)
+		}
+	}
+
+	got, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if got.CallCount != 1 {
+		t.Fatalf("CallCount = %d, want 1 (duplicate deliveries must not double-count)", got.CallCount)
+	}
+	if got.TotalDurationSec != 143 {
+		t.Fatalf("TotalDurationSec = %d, want 143", got.TotalDurationSec)
+	}
+}
+
+// TestConcurrentDuplicateDeliveryIsIdempotent fires the same event_id from
+// many goroutines simultaneously to exercise the TOCTOU window that existed
+// before IngestTx. Only one write should win; stats must reflect exactly one call.
+func TestConcurrentDuplicateDeliveryIsIdempotent(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	const workers = 20
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			resp := post(t, srv.URL+"/webhooks/calls", body)
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("got %d, want 200", resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var evtCount int
+	if err := st.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM events WHERE event_id = $1`, eventID,
+	).Scan(&evtCount); err != nil {
+		t.Fatalf("scan events: %v", err)
+	}
+	if evtCount != 1 {
+		t.Fatalf("events count = %d, want 1", evtCount)
+	}
+
+	got, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if got.CallCount != 1 {
+		t.Fatalf("CallCount = %d, want 1 (concurrent duplicates must not double-count)", got.CallCount)
 	}
 }
