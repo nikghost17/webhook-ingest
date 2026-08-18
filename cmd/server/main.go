@@ -60,4 +60,10 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+
+	// Wait for any recording goroutines still in flight. The HTTP server no
+	// longer accepts new requests at this point, so wg.Wait() will complete
+	// as soon as the last goroutine calls wg.Done().
+	svc.Wait()
+	log.Info("all background work drained, exiting")
 }
